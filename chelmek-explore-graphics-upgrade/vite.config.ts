@@ -148,6 +148,8 @@ function authPopupPlugin(): Plugin {
 export default defineConfig(({ command, isPreview }) => ({
   server: {
     host: "0.0.0.0",
+    // Allow the sandbox preview proxy without opening Vite to arbitrary hosts.
+    allowedHosts: [".e2b.app", "localhost", "127.0.0.1"],
     port: 8080,
     strictPort: true,
   },

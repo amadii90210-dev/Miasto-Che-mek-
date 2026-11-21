@@ -1,36 +1,126 @@
-# This is a basic workflow to help you get started with Actions
+name: Auto-Fix Repository & Deploy Game
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: ["main"]
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "autofix-and-pages"
+  cancel-in-progress: true
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  fix-and-deploy:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Unpack ZIP to root & clean misplaced files in .github/workflows
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          set -euo pipefail
+          CHANGED=0
+
+          # 1. Rozpakuj chelmek-explore-graphics-upgrade.zip do katalogu głównego /
+          if [ -f "chelmek-explore-graphics-upgrade.zip" ]; then
+            mkdir -p /tmp/unpacked
+            unzip -q -o chelmek-explore-graphics-upgrade.zip -d /tmp/unpacked
+            ROOT_HTML=$(find /tmp/unpacked -name "index.html" | head -n 1 || true)
+            if [ -n "$ROOT_HTML" ]; then
+              SRC_DIR=$(dirname "$ROOT_HTML")
+              # Jeśli index.html był w podkatalogu public/, kopiujemy nadrzędny katalog projektu
+              if [ "$(basename "$SRC_DIR")" = "public" ]; then
+                SRC_DIR=$(dirname "$SRC_DIR")
+              fi
+              cp -rf "$SRC_DIR"/. .
+            else
+              cp -rf /tmp/unpacked/. .
+            fi
+            git rm -f --ignore-unmatch chelmek-explore-graphics-upgrade.zip grok-workspace.zip
+            CHANGED=1
+          fi
+
+          # 2. Usuń pliki omyłkowo wgrane do .github/workflows/
+          for f in .node_modules.lock .prettierrc AGENTS.md eslint.config.mjs grok-workspace.zip package-lock.json package.json startup.sh tsconfig.json vercel.json vite.config.ts; do
+            if [ -f ".github/workflows/$f" ]; then
+              git rm -f --ignore-unmatch ".github/workflows/$f"
+              CHANGED=1
+            fi
+          done
+
+          # 3. Utwórz poprawny vercel.json w katalogu głównym /
+          if [ ! -f "vercel.json" ]; then
+            if [ -f "package.json" ]; then
+              cat > vercel.json << 'EOF'
+          {
+            "installCommand": "npm install",
+            "buildCommand": "npm run build",
+            "outputDirectory": "dist"
+          }
+          EOF
+            elif [ -d "public" ] && [ -f "public/index.html" ]; then
+              cat > vercel.json << 'EOF'
+          {
+            "buildCommand": "",
+            "outputDirectory": "public"
+          }
+          EOF
+            else
+              cat > vercel.json << 'EOF'
+          {
+            "buildCommand": "",
+            "outputDirectory": "."
+          }
+          EOF
+            fi
+            CHANGED=1
+          fi
+
+          # 4. Zapisz i wypchnij naprawioną strukturę z powrotem na gałąź main
+          if [ "$CHANGED" -eq 1 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git diff --cached --quiet || (git commit -s -m "fix: unpack game files to root and clean .github/workflows" && git push origin HEAD:main)
+          fi
+
+      - name: Prepare dist folder for GitHub Pages
+        run: |
+          rm -rf dist
+          if [ -f "package.json" ] && grep -q '"build"' package.json; then
+            npm install
+            npm run build
+            if [ ! -d "dist" ] && [ -d "public" ]; then
+              cp -r public dist
+            fi
+          elif [ -d "public" ] && [ -f "public/index.html" ]; then
+            cp -r public dist
+          else
+            mkdir -p dist
+            cp -r index.html *.js *.css *.json *.webp *.png *.svg dist/ 2>/dev/null || true
+          fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
